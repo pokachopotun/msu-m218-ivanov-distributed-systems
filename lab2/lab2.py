@@ -7,11 +7,12 @@ from threading import Thread, Lock, Event
 
 class LogLevel(IntEnum):
     Marker = 1
-    Events = 2
-    Methods = 3
-    Debug = 4
-    Ping = 5
-    All = 6
+    State = 2
+    Events = 3
+    Methods = 4
+    Debug = 5
+    Ping = 6
+    All = 7
 
 global_log_level = LogLevel.All
 
@@ -65,7 +66,7 @@ class TRabbitClient:
         self.output.queue_declare(queue=target)
         self.output.basic_publish(exchange='', routing_key=target, body=message)
 
-    def GetNextMessageForId(self, recipient_id, timeout_seconds = 5):
+    def GetNextMessageForId(self, recipient_id, timeout_seconds = 1):
         LogMethod(LogLevel.Methods, self.idx, "TRabbitClient", "GetNextMessageForId")
         target = self.QueueName(recipient_id)
         self.input.queue_declare(queue=target)
@@ -91,13 +92,28 @@ class TProcessor:
 
     def PingAll(self):
         LogMethod(LogLevel.Ping, self.idx, "TProcessor", "PingAll")
-        return [TMsg("PING", self.idx, receiver, [self.time]) for receiver in range(self.nodes_count)]
+        return [TMsg("PING", self.idx, receiver, [self.GetNextTime()]) for receiver in range(self.nodes_count)]
 
     def RecvNext(self, serialized):
         LogMethod(LogLevel.Methods, self.idx, "TProcessor", "RecvNext Message: {}".format(serialized))
         if serialized:
             return self.ProcessMessage(serialized)
         return None
+
+    def PrintState(self):
+        LogMethod(LogLevel.Methods, self.idx, "TProcessor", "PrintState")
+        if global_log_level <= LogLevel.State:
+            LogMethod(LogLevel.State, self.idx, "SAVED STATE", "Logical time: {}".format(self.saved_state))
+            for i in range(len(self.input_states)):
+                channel = self.input_states[i]
+                result = "Channel {} state:".format(i)
+                for msg in channel:
+                    result += " {}".format(msg.ToString())
+                LogMethod(LogLevel.State, self.idx, "SAVED STATE", result)
+
+    def GetNextTime(self):
+        self.time += 1
+        return self.time
 
     def ProcessMarker(self, message):
         sender = message.sender
@@ -109,11 +125,14 @@ class TProcessor:
             self.seen_inputs.add(sender)
             if len(self.seen_inputs) == nodes_count:
                 LogMethod(LogLevel.Marker, self.idx, "MARKER", "All done!")
+                self.PrintState()
             return None
         else:
             response = self.FirstMarker()
+            self.input_states[message.sender].append(message)
             if len(self.seen_inputs) == nodes_count:
                 LogMethod(LogLevel.Marker, self.idx, "MARKER", "All done!")
+                self.PrintState()
             return response
         return None
 
@@ -129,6 +148,8 @@ class TProcessor:
         raise Exception("[{}] Unknown message type! Serialized message: \"{}\"".format(idx, serialized))
 
     def ProcessPing(self, message):
+        if self.saved_state is not None and message.sender not in self.seen_inputs:
+            self.input_states[message.sender].append(message)
         LogMethod(LogLevel.Ping, self.idx, "TProcessor", "ProcessPing")
         return None
 
@@ -138,7 +159,7 @@ class TProcessor:
         for receiver in range(self.nodes_count):
             if receiver == self.idx:
                 continue
-            response.append(TMsg("MARKER", self.idx, receiver, [self.time]))
+            response.append(TMsg("MARKER", self.idx, receiver, [self.GetNextTime()]))
         return response
 
     def InitiateMarker(self):
@@ -175,6 +196,7 @@ class TReader(Thread):
                 self.client.Send(response)
                 self.initiate_snapshot.clear()
                 continue
+            time.sleep(1)
             serialized = self.client.GetNextMessageForId(self.node.idx)
             response = self.node.RecvNext(serialized)
             self.client.Send(response)
