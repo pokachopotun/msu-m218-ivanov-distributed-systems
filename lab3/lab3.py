@@ -90,6 +90,7 @@ class TProcessor:
         self.allocated = None
         self.total_resources = None
         self.workers = set()
+        self.safe_order = None
 
     def ReadResourceConfig(self):
         with open("total_resources.txt", 'r') as file:
@@ -128,11 +129,18 @@ class TProcessor:
         LogMethod(LogLevel.Methods, self.idx, "TProcessor", "ProcessMessage")
         message = TMsg()
         message.FromString(serialized)
+        if message.msg_type == "KILL":
+            return self.ProcessKill(message)
         if message.msg_type == "DECLARE":
             return self.ProcessDeclare(message)
         if message.msg_type == "INITIATE":
             return self.ProcessInitiate(message)
         raise Exception("[{}] Unknown message type! Serialized message: \"{}\"".format(idx, serialized))
+
+    def ProcessKill(self, message):
+        LogMethod(LogLevel.Check, self.idx, "CHECK", "GOT KILLED BY COORDINATOR!")
+        LogMethod(LogLevel.Methods, self.idx, "TProcessor", "ProcessKill")
+        return "KMP"
 
     def ProcessInitiate(self, message):
         LogMethod(LogLevel.Check, self.idx, "CHECK", "DECLARE!")
@@ -189,6 +197,9 @@ class TProcessor:
             self.total_resources[resource] += self.allocated[self.idx][i]
             self.allocated[self.idx][i] = 0
 
+    def KillAll(self):
+        return [TMsg("KILL", self.idx, receiver, []) for receiver in range(self.nodes_count)]
+
     def ProcessDeclare(self, message):
         LogMethod(LogLevel.Methods, self.idx, "TProcessor", "ProcessDeclare")
         sender = message.sender
@@ -202,6 +213,7 @@ class TProcessor:
                 LogMethod(LogLevel.Check, self.idx, "CHECK", "STATE IS NOT SAFE!")
             else:
                 LogMethod(LogLevel.Check, self.idx, "CHECK", "SAFE ORDER IS: {}".format(str(order)))
+            return self.KillAll()
         return None
 
     def Sum(self, left, right):
@@ -241,6 +253,7 @@ class TReader(Thread):
         self.client = TRabbitClient(node.idx)
         self.node = node
         self.should_stop = should_stop
+        self.dead = False
 
     def run(self):
         self.node.ReadMaxConfig()
@@ -251,6 +264,9 @@ class TReader(Thread):
         while not self.should_stop.wait(1):
             serialized = self.client.GetNextMessageForId(self.node.idx)
             response = self.node.RecvNext(serialized)
+            if response == "KMP":
+                self.dead = True
+                return
             self.client.Send(response)
         LogMethod(LogLevel.Debug, self.node.idx, "TReader", "Stop")
 
@@ -268,7 +284,7 @@ class TNode:
         self.alive = True
 
     def IsAlive(self):
-        return self.alive
+        return self.alive and not self.reader.dead
 
     def Kill(self):
         self.should_stop.set()
@@ -296,23 +312,7 @@ if __name__ == "__main__":
                 return True
         return False
 
-    def KillVictims(nodes):
-        try:
-            with open("victims.txt", 'r') as file:
-                victims = [int(x) for x in file.read().strip().split(' ')]
-        except:
-            return
-
-        for i in victims:
-            node = nodes[i]
-            if node.IsAlive():
-                node.Kill()
-            else:
-                LogMethod(LogLevel.All, node.idx, "VICTIMS", "Already dead")
-
-    cnt = 0
     while Alive(nodes):
         time.sleep(1)
-        KillVictims(nodes)
 
     Log(LogLevel.Events, "All nodes are dead, shutting down!")
